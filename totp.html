@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="本地生成六位动态验证码，不上传、不保存密钥。">
+<title>2FA 动态验证码</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232456dc'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-size='22' fill='white'%3E6%3C/text%3E%3C/svg%3E">
+<style>
+:root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#172138;background:#eef2fa;color-scheme:light}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}main{width:min(100%,480px);background:white;padding:36px;border:1px solid #dfe5f1;border-radius:24px;box-shadow:0 20px 70px #243f7810}h1{font-size:26px;margin:0 0 10px}p{color:#5a667c;font-size:14px;line-height:1.7}.intro{margin:0 0 28px}label{display:block;font-size:14px;font-weight:600;margin-bottom:10px}.entry{display:flex;border:1px solid #a8b5cd;border-radius:10px;overflow:hidden}.entry:focus-within{outline:3px solid #d8e3ff;border-color:#2456dc}input{min-width:0;width:100%;border:0;padding:14px;font-size:16px;outline:none}button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:12px 16px;min-height:46px}button:focus-visible{outline:3px solid #7e9aff;outline-offset:3px}.entry button{border-radius:0;background:#f2f5fb;white-space:nowrap;font-size:14px}.result{background:#f5f7fc;border:1px solid #e4e9f3;border-radius:16px;padding:26px 18px;margin:24px 0 20px;text-align:center}.caption{font-size:14px;color:#5a667c}.code{display:block;font-family:ui-monospace,Consolas,monospace;font-size:clamp(32px,9vw,48px);font-weight:700;letter-spacing:.12em;margin:14px 0;white-space:nowrap}.timer{font-size:14px;color:#5a667c;min-height:22px}progress{display:block;width:100%;height:6px;margin-top:18px;border:0;accent-color:#2456dc}progress::-webkit-progress-bar{background:#dce4f5;border-radius:8px}progress::-webkit-progress-value{background:#2456dc;border-radius:8px}.actions{display:flex;gap:12px}.primary{background:#2456dc;color:white;flex:1}.secondary{background:#edf1f8;color:#334560}button:disabled{cursor:default;opacity:.5}#status{min-height:24px;font-size:14px;margin:12px 0 0;color:#a23232}.foot{margin:16px 0 0;font-size:13px}@media(max-width:400px){body{padding:14px}main{padding:24px 20px}}
+</style>
+</head>
+<body>
+<main>
+<h1>2FA 动态验证码</h1>
+<p class="intro">在本机生成，每 30 秒自动更新。</p>
+<label for="secret">2FA 密钥（Base32）</label>
+<div class="entry"><input id="secret" type="password" autocomplete="off" spellcheck="false" autocapitalize="characters" placeholder="输入你的密钥" aria-describedby="status"><button id="reveal" type="button" aria-pressed="false">显示</button></div>
+<section class="result" aria-label="当前验证码">
+<span class="caption">当前验证码</span>
+<output id="code" class="code">--- ---</output>
+<div id="timer" class="timer">输入密钥后自动生成</div>
+<progress id="progress" max="30" value="0" aria-label="验证码剩余有效时间"></progress>
+</section>
+<div class="actions"><button id="copy" class="primary" disabled>复制验证码</button><button id="clear" class="secondary">清空</button></div>
+<p id="status" role="status" aria-live="polite"></p>
+<p class="foot">密钥仅留在当前页面内存中，不上传、不保存。请保持设备时间准确。适用于 SHA-1 / 6 位 / 30 秒的 TOTP。</p>
+</main>
+<script>
+'use strict';
+function decodeBase32(raw){
+ const s=raw.replace(/\s/g,'').toUpperCase();
+ if(!/^[A-Z2-7]+={0,6}$/.test(s))throw new Error('密钥只能包含 A–Z、2–7 和末尾的 =。');
+ const core=s.replace(/=+$/,'');
+ const remainder=core.length%8;
+ if(![0,2,4,5,7].includes(remainder))throw new Error('密钥长度不正确，请检查是否复制完整。');
+ if(s.includes('=')&&s.length!==Math.ceil(core.length/8)*8)throw new Error('密钥末尾的填充格式不正确。');
+ let value=0,bits=0;const out=[];
+ for(const c of core){value=(value<<5)|'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'.indexOf(c);bits+=5;if(bits>=8){bits-=8;out.push((value>>>bits)&255);value&=(1<<bits)-1;}}
+ if(value!==0)throw new Error('密钥编码不正确，请检查末尾字符。');
+ return new Uint8Array(out);
+}
+async function importSecret(s){return crypto.subtle.importKey('raw',decodeBase32(s),{name:'HMAC',hash:'SHA-1'},false,['sign']);}
+async function totp(key,seconds){
+ let count=BigInt(Math.floor(seconds/30));const bytes=new Uint8Array(8);
+ for(let i=7;i>=0;i--){bytes[i]=Number(count&255n);count>>=8n;}
+ const hash=new Uint8Array(await crypto.subtle.sign('HMAC',key,bytes));const o=hash[19]&15;
+ const n=((hash[o]&127)<<24)|(hash[o+1]<<16)|(hash[o+2]<<8)|hash[o+3];
+ return String(n%1000000).padStart(6,'0');
+}
+const el=id=>document.getElementById(id);
+let key=null,generation=0,lastStep=-1,current='',busy=false;
+function resetResult(){current='';lastStep=-1;el('code').textContent='--- ---';el('timer').textContent='输入密钥后自动生成';el('progress').value=0;el('copy').disabled=true;}
+async function tick(){
+ if(!key||busy)return;
+ const now=Date.now()/1000,step=Math.floor(now/30),remaining=30-now%30;
+ el('timer').textContent=`${Math.ceil(remaining)} 秒后更新`;el('progress').value=remaining;
+ if(step===lastStep)return;
+ const version=generation,activeKey=key;busy=true;
+ try{const code=await totp(activeKey,now);if(version!==generation)return;if(Math.floor(Date.now()/30000)!==step)return;current=code;lastStep=step;el('code').textContent=code.slice(0,3)+' '+code.slice(3);el('copy').disabled=false;}
+ catch{if(version===generation){resetResult();el('status').textContent='生成失败，请重新输入密钥。';}}
+ finally{busy=false;}
+}
+el('secret').addEventListener('input',async()=>{
+ const version=++generation;key=null;resetResult();el('status').textContent='';
+ const raw=el('secret').value;if(!raw.trim())return;
+ try{if(!globalThis.crypto?.subtle)throw new Error('当前浏览器不支持本地加密，请使用新版 Edge 或 Chrome 打开此文件。');const imported=await importSecret(raw);if(version!==generation)return;key=imported;await tick();}
+ catch(e){if(version===generation)el('status').textContent=e.message;}
+});
+el('reveal').addEventListener('click',()=>{const show=el('secret').type==='password';el('secret').type=show?'text':'password';el('reveal').textContent=show?'隐藏':'显示';el('reveal').setAttribute('aria-pressed',String(show));});
+el('clear').addEventListener('click',()=>{generation++;key=null;el('secret').value='';el('secret').type='password';el('reveal').textContent='显示';el('reveal').setAttribute('aria-pressed','false');resetResult();el('status').textContent='';el('secret').focus();});
+el('copy').addEventListener('click',async()=>{
+ if(!key)return;const version=generation;
+ try{const fresh=await totp(key,Date.now()/1000);if(version!==generation)return;await navigator.clipboard.writeText(fresh);el('status').textContent='验证码已复制。';}
+ catch{el('status').textContent='浏览器未允许复制，请选中上方验证码手动复制。';}
+});
+setInterval(tick,250);document.addEventListener('visibilitychange',()=>{if(!document.hidden)tick();});
+</script>
+</body>
+</html>
